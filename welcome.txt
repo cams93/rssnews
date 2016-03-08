@@ -1,0 +1,4 @@
+Mensaje de bienvenida, pueden cambiarlo como deseen
+
+Informacion sobre que es un RSS https://en.wikipedia.org/wiki/RSS
+

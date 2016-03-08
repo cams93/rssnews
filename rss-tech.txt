@@ -1,0 +1,2 @@
+TechRunch: feeds.feedburner.com/techcrunch
+InterestingThingOfTheDay: feeds.feedburner.com/InterestingThingOfTheDay
