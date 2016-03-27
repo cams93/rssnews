@@ -1,3 +1,13 @@
+/*
+ ============================================================================
+ Name        : test.c
+ Author      : 
+ Version     :
+ Copyright   : Your copyright notice
+ Description : Hello World in C, Ansi-style
+ ============================================================================
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -9,19 +19,8 @@
 #include "urlconnection.h"
 #include "streamtokenizer.h"
 #include "html-utils.h"
-
-static void Welcome(const char *welcomeTextFileName);
-static void BuildIndices(const char *feedsFileName);
-static void ProcessFeed(const char *remoteDocumentName);
-static void PullAllNewsItems(urlconnection *urlconn);
-static bool GetNextItemTag(streamtokenizer *st);
-static void ProcessSingleNewsItem(streamtokenizer *st);
-static void ExtractElement(streamtokenizer *st, const char *htmlTag, char dataBuffer[], int bufferLength);
-static void ParseArticle(const char *articleTitle, const char *articleDescription, const char *articleURL);
-static void ScanArticle(streamtokenizer *st, const char *articleTitle, const char *unused, const char *articleURL);
-static void QueryIndices();
-static void ProcessResponse(const char *word);
-static bool WordIsWellFormed(const char *word);
+#include "hashset.h"
+#include "rss-news-search.h"
 
 /**
  * Function: main
@@ -43,11 +42,20 @@ static bool WordIsWellFormed(const char *word);
 static const char *const kWelcomeTextFile = "welcome.txt";
 static const char *const kDefaultFeedsFile = "rss-feeds.txt";
 static const char *const kDefaultStopWords = "stop-words.txt";
+static const signed long kHashMultiplier = -1664117991L;
+static hashset wordsIgnored;
+static vector urls;
+
 int main(int argc, char **argv)
 {
+  HashSetNew(&wordsIgnored, sizeof(char*), 10000, StringHash, cmpStrings, freeString);
+  readStopWords(&wordsIgnored);
+  VectorNew(&urls, sizeof(Words*), freeWords, 248);
   Welcome(kWelcomeTextFile);
   BuildIndices((argc == 1) ? kDefaultFeedsFile : argv[1]);
   QueryIndices();
+  HashSetDispose(&wordsIgnored);
+  VectorDispose(&urls);
   return 0;
 }
 
@@ -109,7 +117,7 @@ static void BuildIndices(const char *feedsFileName)
   assert(infile != NULL);
   STNew(&st, infile, kNewLineDelimiters, true);
   while (STSkipUntil(&st, ":") != EOF) { // ignore everything up to the first selicolon of the line
-    STSkipOver(&st, ": ");		 // now ignore the semicolon and any whitespace directly after it
+    STSkipOver(&st, ": ");     // now ignore the semicolon and any whitespace directly after it
     STNextToken(&st, remoteFileName, sizeof(remoteFileName));   
     ProcessFeed(remoteFileName);
   }
@@ -146,8 +154,8 @@ static void ProcessFeed(const char *remoteDocumentName)
       case 302: ProcessFeed(urlconn.newUrl);
                 break;
       default: printf("Connection to \"%s\" was established, but unable to retrieve \"%s\". [response code: %d, response message:\"%s\"]\n",
-		      u.serverName, u.fileName, urlconn.responseCode, urlconn.responseMessage);
-	       break;
+          u.serverName, u.fileName, urlconn.responseCode, urlconn.responseMessage);
+         break;
   };
   
   URLConnectionDispose(&urlconn);
@@ -222,7 +230,7 @@ static bool GetNextItemTag(streamtokenizer *st)
     if (strncasecmp(htmlTag, kItemTagPrefix, strlen(kItemTagPrefix)) == 0) {
       return true;
     }
-  }	 
+  }  
   return false;
 }
 
@@ -330,18 +338,18 @@ static void ParseArticle(const char *articleTitle, const char *articleDescriptio
   
   switch (urlconn.responseCode) {
       case 0: printf("Unable to connect to \"%s\".  Domain name or IP address is nonexistent.\n", articleURL);
-	      break;
-      case 200: printf("Scanning \"%s\" from \"http://%s\"\n", articleTitle, u.serverName);
-	        STNew(&st, urlconn.dataStream, kTextDelimiters, false);
-		ScanArticle(&st, articleTitle, articleDescription, articleURL);
-		STDispose(&st);
-		break;
+        break;
+      case 200: printf("[%s] Indexing \"%s\"\n", u.serverName, articleTitle);
+          STNew(&st, urlconn.dataStream, kTextDelimiters, false);
+    ScanArticle(&st, articleTitle, articleDescription, articleURL);
+    STDispose(&st);
+    break;
       case 301:
       case 302: // just pretend we have the redirected URL all along, though index using the new URL and not the old one...
                 ParseArticle(articleTitle, articleDescription, urlconn.newUrl);
-		break;
+    break;
       default: printf("Unable to pull \"%s\" from \"%s\". [Response code: %d] Punting...\n", articleTitle, u.serverName, urlconn.responseCode);
-	       break;
+         break;
   }
   
   URLConnectionDispose(&urlconn);
@@ -361,30 +369,56 @@ static void ParseArticle(const char *articleTitle, const char *articleDescriptio
  * code that indexes the specified content.
  */
 
+//MODIFY
+//gcc -m32 -o rss-news-search rss-news-search.c librssnews.a 
+//./rss-news-search rss-tech.txt
 static void ScanArticle(streamtokenizer *st, const char *articleTitle, const char *unused, const char *articleURL)
 {
   int numWords = 0;
   char word[1024];
   char longestWord[1024] = {'\0'};
+  char *url = (char*)calloc(strlen(articleTitle) + 2, sizeof(char));
+  
+  memmove(url, articleTitle, strlen(articleTitle) * sizeof(char));
+  strcat(url, " ");
+  Words *url2 = (Words*)malloc(sizeof(Words));
+  url2->url = (char*)calloc(strlen(url), sizeof(char));
+  memmove(url2->url, url, strlen(url) * sizeof(char));
+  free(url);
+  url2->words = (hashset*)malloc(sizeof(hashset));
+  HashSetNew(url2->words, sizeof(Freq*), 1000, hashFrec, cmpFrec, freeFrec);
 
   while (STNextToken(st, word, sizeof(word))) {
     if (strcasecmp(word, "<") == 0) {
-      SkipIrrelevantContent(st); // in html-utls.h
+      SkipIrrelevantContent(st);
     } else {
       RemoveEscapeCharacters(word);
       if (WordIsWellFormed(word)) {
-	numWords++;
-	if (strlen(word) > strlen(longestWord))
-	  strcpy(longestWord, word);
+        char *current = (char*)calloc(strlen(word) + 1, sizeof(char));
+        memmove(current, word, strlen(word) * sizeof(char));
+        char **res = (char**)HashSetLookup(&wordsIgnored, &current);
+        if(res == NULL){
+          Freq *frecuency = (Freq*)malloc(sizeof(Freq));
+          frecuency->word = (char*)calloc(strlen(current) + 1, sizeof(char));
+          memmove(frecuency->word, current, strlen(current) * sizeof(char));
+          frecuency->freq = 1;
+          free(current);
+          Freq **included = (Freq**)HashSetLookup(url2->words,&frecuency);
+          if(included == NULL){
+            HashSetEnter(url2->words, &frecuency);
+          } else{
+            frecuency->freq += (*included)->freq;
+            HashSetEnter(url2->words, &frecuency);
+          }
+        }
+        numWords++;
+        if (strlen(word) > strlen(longestWord)){
+          strcpy(longestWord, word);
+        }
       }
     }
   }
-
-  printf("\tWe counted %d well-formed words [including duplicates].\n", numWords);
-  printf("\tThe longest word scanned was \"%s\".", longestWord);
-  if (strlen(longestWord) >= 15 && (strchr(longestWord, '-') == NULL)) 
-    printf(" [Ooooo... long word!]");
-  printf("\n");
+  VectorAppend(&urls, &url2);
 }
 
 /** 
@@ -414,13 +448,35 @@ static void QueryIndices()
  * for a list of web documents containing the specified word.
  */
 
+//MODIFY
 static void ProcessResponse(const char *word)
 {
-  if (WordIsWellFormed(word)) {
-    printf("\tWell, we don't have the database mapping words to online news articles yet, but if we DID have\n");
-    printf("\tour hashset of indices, we'd list all of the articles containing \"%s\".\n", word);
-  } else {
-    printf("\tWe won't be allowing words like \"%s\" into our set of indices.\n", word);
+  char **wordIgnored = (char**)HashSetLookup(&wordsIgnored, &word);
+  int found = 0;
+  if(wordIgnored == NULL){
+    int i;
+    Freq *tempFrec = (Freq*)malloc(sizeof(Freq));
+    tempFrec->word=(char*)calloc(strlen(word) + 1, sizeof(char));
+    memmove(tempFrec->word, word, sizeof(char) * strlen(word));
+    tempFrec->freq = 0;
+    Words **urlget;
+    Freq **r;
+    for(i = 0; i < VectorLength(&urls); i++){
+      urlget = (Words**)VectorNth(&urls, i);
+      r = (Freq**)HashSetLookup((*urlget)->words, &tempFrec);
+      if(r != NULL){
+        printf("\"%s\"[search term occurs %d times]\n", (*urlget)->url, (*r)->freq);
+        found = 1;
+      }
+    }
+    free(tempFrec->word);
+    free(tempFrec);
+  }
+  else{
+    printf("\"%s\" is too common a word to be taken seriously. Please be more specific.\n", word);
+  }
+  if(found == 0){
+     printf("None of today's news articles contain the word \"%s\".\n", word);
   }
 }
 
@@ -444,4 +500,71 @@ static bool WordIsWellFormed(const char *word)
     if (!isalnum((int) word[i]) && (word[i] != '-')) return false; 
 
   return true;
+}
+
+static void readStopWords(hashset *h){
+  FILE *f = fopen(kDefaultStopWords, "r");
+  assert(f != NULL && "cannot open the file");
+  char *word = (char*)calloc(31, sizeof(char));
+  char chr = fgetc(f);
+  int i = 0;
+  while(chr != EOF){
+    if(chr != '\n'){
+      word[i] = chr;
+      i++;
+    } else{
+      HashSetEnter(h, &word);
+      word = (char*)calloc(21, sizeof(char));
+      i = 0;
+    }
+    chr = fgetc(f);
+  }
+  HashSetEnter(h, &word);
+  fclose(f);
+}
+
+static int StringHash(const void *a, int numBuckets)  
+{            
+  char **str = (char**)a;
+  int i;
+  unsigned long hashcode = 0;
+  for (i = 0; i < strlen(*str); i++)  
+    hashcode = hashcode * kHashMultiplier + tolower((*str)[i]);  
+  return hashcode % numBuckets;                                
+}
+
+static int hashFrec(const void *a, int numberBuckets){
+  Freq **frec = (Freq**)a;
+  return StringHash(&((*frec)->word), numberBuckets);
+}
+
+static int cmpStrings(const void *a, const void *b){
+  char **string1 = (char**)a;
+  char **string2 = (char**)b;
+  return strcmp(*string1, *string2);
+}
+
+static int cmpFrec(const void *a, const void *b){
+  Freq **f1 = (Freq**)a;
+  Freq **f2 = (Freq**)b;
+  return cmpStrings(&((*f1)->word), &((*f2)->word));
+}
+
+static void freeString(void *a){
+  char **string = (char**)a;
+  free(*string);
+}
+
+static void freeFrec(void *a){
+  Freq **frec = (Freq**)a;
+  free((*frec)->word);
+  free(*frec);
+}
+
+static void freeWords(void *a){
+  Words **wr = (Words**)a;
+  free((*wr)->url);
+  HashSetDispose((*wr)->words);
+  free((*wr)->words);
+  free(*wr);
 }

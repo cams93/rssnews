@@ -1,4 +1,4 @@
-Mensaje de bienvenida, pueden cambiarlo como deseen
+Welcome to RSS News
 
-Informacion sobre que es un RSS https://en.wikipedia.org/wiki/RSS
+Information about what is an RSS https://en.wikipedia.org/wiki/RSS
 
